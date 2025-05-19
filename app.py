@@ -1,12 +1,25 @@
 import streamlit as st
 import numpy as np
-import os
 import zipfile
+import cv2
 from scipy.ndimage import gaussian_filter
 from io import BytesIO
 from PIL import Image
 
+# 1. Resize utility to downscale large images
+def resize_if_large(img, max_dim=1024):
+    h, w = img.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        return cv2.resize(img, (int(w * scale), int(h * scale)))
+    return img
 
+# 2. Efficient image loading using cache
+@st.cache_data
+def load_image(file):
+    return np.array(Image.open(file).convert("RGB"))
+
+# 3. Adjust brightness and contrast without hue manipulation
 def apply_adjustments_no_hue(img, brightness_map, contrast_map):
     b, g, r = cv2.split(img.astype(np.float32))
     b = contrast_map * b + (brightness_map - 1) * 100
@@ -14,6 +27,7 @@ def apply_adjustments_no_hue(img, brightness_map, contrast_map):
     r = contrast_map * r + (brightness_map - 1) * 100
     return cv2.merge([np.clip(b, 0, 255), np.clip(g, 0, 255), np.clip(r, 0, 255)]).astype(np.uint8)
 
+# 4. Apply circular shadow to the image
 def apply_tamper_shadow(img, intensity=0.5, radius_fraction=0.5):
     h, w = img.shape[:2]
     cx, cy = w // 2, h // 2
@@ -24,7 +38,8 @@ def apply_tamper_shadow(img, intensity=0.5, radius_fraction=0.5):
     shadow = 1 - intensity * mask[..., np.newaxis]
     return (img.astype(np.float32) * shadow).astype(np.uint8)
 
-def match_image_gridwise_smooth_no_hue(ref_img, client_img, grid=(6,6), sigma=10):
+# 5. Main matching function with grid-based brightness & contrast mapping
+def match_image_gridwise_smooth_no_hue(ref_img, client_img, grid=(6,6), sigma=5):
     h, w = ref_img.shape[:2]
     gh, gw = h // grid[0], w // grid[1]
     brightness_map = np.zeros((grid[0], grid[1]), dtype=np.float32)
@@ -50,34 +65,38 @@ def match_image_gridwise_smooth_no_hue(ref_img, client_img, grid=(6,6), sigma=10
     adjusted = apply_adjustments_no_hue(client_img, brightness_map_smooth, contrast_map_smooth)
     return apply_tamper_shadow(adjusted, intensity=0.4, radius_fraction=0.5)
 
-def convert_to_image(cv_img):
-    return Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
+# ---------------- Streamlit UI ----------------
+st.title("📸 Batch Image Color Matching Tool (No Hue + Shadow)")
 
-st.title("Batch Image Color Matching Tool (No Hue + Shadow Effect)")
+ref_imgs = st.file_uploader("📂 Upload Reference Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+cli_imgs = st.file_uploader("📂 Upload Client Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+sigma = st.slider("🌀 Gaussian Smoothness (Sigma)", 1, 20, 5)
 
-ref_imgs = st.file_uploader("Upload Reference Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-cli_imgs = st.file_uploader("Upload Client Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-
-if st.button("Process Images") and ref_imgs and cli_imgs:
+if st.button("🚀 Process Images") and ref_imgs and cli_imgs:
     zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zipf:
-        for r_idx, r_file in enumerate(ref_imgs):
-            ref_np = np.array(Image.open(r_file).convert("RGB"))
-            ref_cv = cv2.cvtColor(ref_np, cv2.COLOR_RGB2BGR)
+    total = len(ref_imgs) * len(cli_imgs)
+    count = 0
+    progress_bar = st.progress(0)
 
-            for c_idx, c_file in enumerate(cli_imgs):
-                cli_np = np.array(Image.open(c_file).convert("RGB"))
-                cli_cv = cv2.cvtColor(cli_np, cv2.COLOR_RGB2BGR)
+    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zipf:
+        for r_file in ref_imgs:
+            ref_np = load_image(r_file)
+            ref_cv = resize_if_large(cv2.cvtColor(ref_np, cv2.COLOR_RGB2BGR))
+
+            for c_file in cli_imgs:
+                cli_np = load_image(c_file)
+                cli_cv = resize_if_large(cv2.cvtColor(cli_np, cv2.COLOR_RGB2BGR))
                 cli_resized = cv2.resize(cli_cv, (ref_cv.shape[1], ref_cv.shape[0]))
 
-                output = match_image_gridwise_smooth_no_hue(ref_cv, cli_resized)
+                output = match_image_gridwise_smooth_no_hue(ref_cv, cli_resized, sigma=sigma)
 
-                result_img = convert_to_image(output)
+                # Save directly using OpenCV to reduce overhead
+                _, img_encoded = cv2.imencode('.jpg', output)
                 img_name = f"{r_file.name.split('.')[0]}__{c_file.name.split('.')[0]}.jpg"
-                buffer = BytesIO()
-                result_img.save(buffer, format="JPEG")
-                zipf.writestr(img_name, buffer.getvalue())
+                zipf.writestr(img_name, img_encoded.tobytes())
 
-    st.success("Processing Complete!")
-    st.download_button("Download All as ZIP", data=zip_buffer.getvalue(), file_name="processed_images.zip")
+                count += 1
+                progress_bar.progress(count / total)
 
+    st.success("✅ Processing Complete!")
+    st.download_button("📦 Download All as ZIP", data=zip_buffer.getvalue(), file_name="processed_images.zip")
