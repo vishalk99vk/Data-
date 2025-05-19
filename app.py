@@ -62,24 +62,26 @@ def match_image_gridwise_smooth_no_hue(ref_img, client_img, grid=(6,6), sigma=5)
 
     brightness_map_up = cv2.resize(brightness_map, (w, h), interpolation=cv2.INTER_LINEAR)
     contrast_map_up = cv2.resize(contrast_map, (w, h), interpolation=cv2.INTER_LINEAR)
-    brightness_map_smooth = gaussian_filter(brightness_map_up, sigma=sigma)
-    contrast_map_smooth = gaussian_filter(contrast_map_up, sigma=sigma)
+
+    # Fixed sigma smoothing
+    brightness_map_smooth = gaussian_filter(brightness_map_up, sigma=5)
+    contrast_map_smooth = gaussian_filter(contrast_map_up, sigma=5)
+
     adjusted = apply_adjustments_no_hue(client_img, brightness_map_smooth, contrast_map_smooth)
     return apply_tamper_shadow(adjusted, intensity=0.4, radius_fraction=0.5)
 
 # Function to process one pair of images for parallel processing
-def process_pair(ref_np, cli_np, sigma):
+def process_pair(ref_np, cli_np):
     ref_cv = resize_if_large(cv2.cvtColor(ref_np, cv2.COLOR_RGB2BGR))
     cli_cv = resize_if_large(cv2.cvtColor(cli_np, cv2.COLOR_RGB2BGR))
     cli_resized = cv2.resize(cli_cv, (ref_cv.shape[1], ref_cv.shape[0]))
-    return match_image_gridwise_smooth_no_hue(ref_cv, cli_resized, sigma=sigma)
+    return match_image_gridwise_smooth_no_hue(ref_cv, cli_resized)
 
 # ---------------- Streamlit UI ----------------
 st.title("📸 Batch Image Color Matching Tool (No Hue + Shadow)")
 
 ref_imgs = st.file_uploader("📂 Upload Reference Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 cli_imgs = st.file_uploader("📂 Upload Client Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-sigma = st.slider("🌀 Gaussian Smoothness (Sigma)", 1, 20, 5)
 
 # Preview one reference and one client image
 if ref_imgs and cli_imgs:
@@ -111,7 +113,7 @@ if st.button("🚀 Process Images") and ref_imgs and cli_imgs:
                     except Exception as e:
                         st.error(f"Error loading client image {c_file.name}: {e}")
                         continue
-                    futures.append((r_file.name, c_file.name, executor.submit(process_pair, ref_np, cli_np, sigma)))
+                    futures.append((r_file.name, c_file.name, executor.submit(process_pair, ref_np, cli_np)))
 
             for r_name, c_name, future in futures:
                 try:
