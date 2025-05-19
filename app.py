@@ -5,6 +5,8 @@ import cv2
 from scipy.ndimage import gaussian_filter
 from io import BytesIO
 from PIL import Image
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 # 1. Resize utility to downscale large images
 def resize_if_large(img, max_dim=1024):
@@ -65,12 +67,27 @@ def match_image_gridwise_smooth_no_hue(ref_img, client_img, grid=(6,6), sigma=5)
     adjusted = apply_adjustments_no_hue(client_img, brightness_map_smooth, contrast_map_smooth)
     return apply_tamper_shadow(adjusted, intensity=0.4, radius_fraction=0.5)
 
+# Function to process one pair of images for parallel processing
+def process_pair(ref_np, cli_np, sigma):
+    ref_cv = resize_if_large(cv2.cvtColor(ref_np, cv2.COLOR_RGB2BGR))
+    cli_cv = resize_if_large(cv2.cvtColor(cli_np, cv2.COLOR_RGB2BGR))
+    cli_resized = cv2.resize(cli_cv, (ref_cv.shape[1], ref_cv.shape[0]))
+    return match_image_gridwise_smooth_no_hue(ref_cv, cli_resized, sigma=sigma)
+
 # ---------------- Streamlit UI ----------------
 st.title("📸 Batch Image Color Matching Tool (No Hue + Shadow)")
 
 ref_imgs = st.file_uploader("📂 Upload Reference Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 cli_imgs = st.file_uploader("📂 Upload Client Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 sigma = st.slider("🌀 Gaussian Smoothness (Sigma)", 1, 20, 5)
+
+# Preview one reference and one client image
+if ref_imgs and cli_imgs:
+    try:
+        st.image(load_image(ref_imgs[0]), caption="Sample Reference Image", width=300)
+        st.image(load_image(cli_imgs[0]), caption="Sample Client Image", width=300)
+    except Exception as e:
+        st.warning(f"Preview failed: {e}")
 
 if st.button("🚀 Process Images") and ref_imgs and cli_imgs:
     zip_buffer = BytesIO()
@@ -79,24 +96,58 @@ if st.button("🚀 Process Images") and ref_imgs and cli_imgs:
     progress_bar = st.progress(0)
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zipf:
-        for r_file in ref_imgs:
-            ref_np = load_image(r_file)
-            ref_cv = resize_if_large(cv2.cvtColor(ref_np, cv2.COLOR_RGB2BGR))
+        with ThreadPoolExecutor() as executor:
+            futures = []
+            for r_file in ref_imgs:
+                try:
+                    ref_np = load_image(r_file)
+                except Exception as e:
+                    st.error(f"Error loading reference image {r_file.name}: {e}")
+                    continue
 
-            for c_file in cli_imgs:
-                cli_np = load_image(c_file)
-                cli_cv = resize_if_large(cv2.cvtColor(cli_np, cv2.COLOR_RGB2BGR))
-                cli_resized = cv2.resize(cli_cv, (ref_cv.shape[1], ref_cv.shape[0]))
+                for c_file in cli_imgs:
+                    try:
+                        cli_np = load_image(c_file)
+                    except Exception as e:
+                        st.error(f"Error loading client image {c_file.name}: {e}")
+                        continue
+                    futures.append((r_file.name, c_file.name, executor.submit(process_pair, ref_np, cli_np, sigma)))
 
-                output = match_image_gridwise_smooth_no_hue(ref_cv, cli_resized, sigma=sigma)
+            for r_name, c_name, future in futures:
+                try:
+                    output = future.result()
+                except Exception as e:
+                    st.error(f"Error processing {r_name} and {c_name}: {e}")
+                    continue
 
-                # Save directly using OpenCV to reduce overhead
+                # Clean file names
+                base_r = os.path.splitext(r_name)[0]
+                base_c = os.path.splitext(c_name)[0]
+                img_name = f"{base_r}__{base_c}.jpg"
+
+                # Save image to zip
                 _, img_encoded = cv2.imencode('.jpg', output)
-                img_name = f"{r_file.name.split('.')[0]}__{c_file.name.split('.')[0]}.jpg"
                 zipf.writestr(img_name, img_encoded.tobytes())
 
                 count += 1
                 progress_bar.progress(count / total)
 
+                # Free memory
+                del output
+
     st.success("✅ Processing Complete!")
     st.download_button("📦 Download All as ZIP", data=zip_buffer.getvalue(), file_name="processed_images.zip")
+
+# Custom button styling (optional)
+st.markdown(
+    """
+    <style>
+    div.stButton > button {
+        background-color: #0099ff;
+        color: white;
+        font-weight: bold;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
