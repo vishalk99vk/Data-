@@ -83,14 +83,6 @@ st.title("📸 Batch Image Color Matching Tool (No Hue + Shadow)")
 ref_imgs = st.file_uploader("📂 Upload Reference Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 cli_imgs = st.file_uploader("📂 Upload Client Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-# Preview one reference and one client image
-if ref_imgs and cli_imgs:
-    try:
-        st.image(load_image(ref_imgs[0]), caption="Sample Reference Image", width=300)
-        st.image(load_image(cli_imgs[0]), caption="Sample Client Image", width=300)
-    except Exception as e:
-        st.warning(f"Preview failed: {e}")
-
 if st.button("🚀 Process Images") and ref_imgs and cli_imgs:
     zip_buffer = BytesIO()
     total = len(ref_imgs) * len(cli_imgs)
