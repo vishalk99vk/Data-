@@ -5,6 +5,7 @@ import cv2
 from scipy.ndimage import gaussian_filter
 from io import BytesIO
 from PIL import Image
+import os
 
 # 1. Resize utility to downscale large images
 def resize_if_large(img, max_dim=1024):
@@ -79,16 +80,14 @@ def apply_3d_rotation(img, angle=30):
     M = cv2.getPerspectiveTransform(pts1, pts2)
     return cv2.warpPerspective(img, M, (w, h))
 
-# Dummy placeholders for reflection effects (you can implement your own)
+# Dummy placeholders for reflection effects
 def apply_gaussian_blur(img):
     return cv2.GaussianBlur(img, (15, 15), 0)
 
 def apply_reflection(img):
-    # Simple horizontal flip as dummy reflection effect
     return cv2.flip(img, 1)
 
 def apply_human_reflection(img):
-    # For demo, apply reflection + slight brightness increase
     reflected = apply_reflection(img)
     return cv2.convertScaleAbs(reflected, alpha=1.1, beta=20)
 
@@ -106,16 +105,26 @@ def apply_default_effect(img, effect_name, rotation_angle=30, tint_alpha=0.3):
     else:
         return img
 
+# -------- Helper to extract images from ZIP --------
+def extract_images_from_zip(zip_file):
+    images = []
+    with zipfile.ZipFile(zip_file) as z:
+        for file in z.namelist():
+            if file.lower().endswith((".jpg", ".jpeg", ".png")):
+                with z.open(file) as f:
+                    img = np.array(Image.open(f).convert("RGB"))
+                    images.append((file, img))
+    return images
+
 # ---------------- Streamlit UI ----------------
-st.title("📸 Batch Image Color Matching Tool (No Hue + Shadow)")
+st.title("📸 Batch Image Color Matching Tool with ZIP Bulk Support")
 
 ref_imgs = st.file_uploader("📂 Upload Reference Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-cli_imgs = st.file_uploader("📂 Upload Client Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-# Only show sigma internally (no slider per your request, keep default)
-sigma = 5
+client_files = st.file_uploader("📂 Upload Client Images or ZIP file", type=["jpg", "jpeg", "png", "zip"], accept_multiple_files=False)
 
-# Default effect if no reference images provided
+sigma = 5  # fixed smoothing sigma
+
 default_effects = ["Gaussian Blur", "Reflection", "Human Reflection", "Tint", "3D Rotation"]
 selected_effect = None
 rotation_angle = 30
@@ -128,48 +137,47 @@ if not ref_imgs:
     elif selected_effect == "Tint":
         tint_alpha = st.slider("Select Tint Intensity (alpha):", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
 
-if st.button("🚀 Process Images") and cli_imgs:
+if st.button("🚀 Process Images") and client_files:
     zip_buffer = BytesIO()
-    total = 0
+
+    # Load reference images if uploaded
+    ref_images_cv = []
+    if ref_imgs:
+        for r_file in ref_imgs:
+            ref_np = load_image(r_file)
+            ref_cv = resize_if_large(cv2.cvtColor(ref_np, cv2.COLOR_RGB2BGR))
+            ref_images_cv.append((r_file.name, ref_cv))
+
+    # Check if client upload is ZIP or single image
+    client_images = []
+    if client_files.name.lower().endswith(".zip"):
+        client_images = extract_images_from_zip(client_files)
+    else:
+        img_np = load_image(client_files)
+        img_cv = resize_if_large(cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
+        client_images = [(client_files.name, img_cv)]
+
+    total = len(client_images) * max(1, len(ref_images_cv))
     count = 0
     progress_bar = st.progress(0)
 
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED) as zipf:
-
-        # If reference images exist, run matching
-        if ref_imgs:
-            total = len(ref_imgs) * len(cli_imgs)
-            for r_file in ref_imgs:
-                ref_np = load_image(r_file)
-                ref_cv = resize_if_large(cv2.cvtColor(ref_np, cv2.COLOR_RGB2BGR))
-
-                for c_file in cli_imgs:
-                    cli_np = load_image(c_file)
-                    cli_cv = resize_if_large(cv2.cvtColor(cli_np, cv2.COLOR_RGB2BGR))
+        if ref_images_cv:
+            for r_name, ref_cv in ref_images_cv:
+                for c_name, cli_cv in client_images:
                     cli_resized = cv2.resize(cli_cv, (ref_cv.shape[1], ref_cv.shape[0]))
-
                     output = match_image_gridwise_smooth_no_hue(ref_cv, cli_resized, sigma=sigma)
-
+                    out_name = f"{r_name.split('.')[0]}__{c_name.split('.')[0]}.jpg"
                     _, img_encoded = cv2.imencode('.jpg', output)
-                    img_name = f"{r_file.name.split('.')[0]}__{c_file.name.split('.')[0]}.jpg"
-                    zipf.writestr(img_name, img_encoded.tobytes())
-
+                    zipf.writestr(out_name, img_encoded.tobytes())
                     count += 1
                     progress_bar.progress(count / total)
-
-        # If no reference images, apply default effect only on client images
         else:
-            total = len(cli_imgs)
-            for c_file in cli_imgs:
-                cli_np = load_image(c_file)
-                cli_cv = resize_if_large(cv2.cvtColor(cli_np, cv2.COLOR_RGB2BGR))
-
+            for c_name, cli_cv in client_images:
                 output = apply_default_effect(cli_cv, selected_effect, rotation_angle, tint_alpha)
-
+                out_name = f"defaultEffect__{c_name.split('.')[0]}.jpg"
                 _, img_encoded = cv2.imencode('.jpg', output)
-                img_name = f"defaultEffect__{c_file.name.split('.')[0]}.jpg"
-                zipf.writestr(img_name, img_encoded.tobytes())
-
+                zipf.writestr(out_name, img_encoded.tobytes())
                 count += 1
                 progress_bar.progress(count / total)
 
